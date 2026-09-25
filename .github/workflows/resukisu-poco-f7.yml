@@ -1,0 +1,1284 @@
+name: ReSukiSU POCO F7 GKI Build
+
+# GKI (android15-6.6) kernel with ReSukiSU for POCO F7 / Redmi Turbo 4 Pro
+# (codename onyx, SM8735 / Snapdragon 8s Gen 4).
+#
+# Adapted from palazik/actions_oplus_sm8750 "Build ReSukiSU.yml" (OnePlus 13 / SM8750).
+# Instead of a vendor source tree, the kernel is built from the Android Common Kernel
+# GKI release branch picked with the `gki_release` input. Release -> kernel version list:
+#   https://source.android.com/docs/core/architecture/kernel/gki-android15-6_6-release-builds
+# Pick the release that matches the "Kernel version" shown in Settings > About phone
+# (or a newer one): GKI keeps the KMI stable, so a newer GKI still loads the stock
+# vendor modules, while an older one may be missing symbols they need.
+#   2024-11 = 6.6.56   2025-03 = 6.6.77   2025-06 = 6.6.89    2025-10 = 6.6.102
+#   2026-01 = 6.6.118  2026-04 = 6.6.127  2026-07 = 6.6.139
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.gki_release }}
+  cancel-in-progress: true
+
+env:
+  TZ: UTC
+  ANDROID_VERSION: 'android15'
+  KERNEL_VERSION: '6.6'
+  DEVICE_NAME: 'POCO F7'
+  DEVICE_CODENAME: 'onyx'
+  SOC_NAME: 'SM8735 (Snapdragon 8s Gen 4)'
+
+on:
+  workflow_dispatch:
+    inputs:
+      gki_release:
+        description: 'GKI release (android15-6.6-<release>), must be >= your stock kernel: 2025-06=6.6.89, 2025-10=6.6.102, 2026-01=6.6.118, 2026-04=6.6.127, 2026-07=6.6.139, or lts'
+        required: true
+        type: string
+        default: '2026-01'
+      kernel_suffix:
+        description: 'Kernel name suffix (uname -r = <version>-<suffix>). Empty = repository owner'
+        required: false
+        type: string
+        default: ''
+      SUSFS:
+        description: 'Enable SuSFS (Enhances hide environment)'
+        required: true
+        type: boolean
+        default: true
+      zstd_enable:
+        description: 'Update ZSTD to 1.5.7'
+        required: true
+        type: boolean
+        default: true
+      lz4kd_enable:
+        description: 'Install LZ4KD Patch (ZRAM optimization)'
+        required: true
+        type: boolean
+        default: false
+      bbr_enable:
+        description: "Enable TCP BBR (false=off, true=add, default=set as default)"
+        required: true
+        type: choice
+        default: 'true'
+        options:
+          - 'false'
+          - 'true'
+          - 'default'
+      adios_enable:
+        description: 'Enable ADIOS IO Scheduler (6.12 backport, compile-tested only)'
+        required: true
+        type: boolean
+        default: false
+      baseband_guard:
+        description: 'Enable Baseband Guard (Anti-brick modem protection)'
+        required: true
+        type: boolean
+        default: true
+      lto_type:
+        description: 'LTO Optimization (none = fast compile, thin = default, full = slow)'
+        required: true
+        type: choice
+        default: 'thin'
+        options:
+          - 'none'
+          - 'thin'
+          - 'full'
+      bore_enable:
+        description: 'Enable BORE Scheduler (Burst-Oriented Response Enhancer, off by default)'
+        required: true
+        type: boolean
+        default: false
+      schedutil_opt:
+        description: 'Enable SchedUtil optimizations (better CPU governor)'
+        required: true
+        type: boolean
+        default: false
+      cpu_opt:
+        description: 'CPU Optimizations (Cortex-X4 / Cortex-A720 tuning for SM8735)'
+        required: true
+        type: boolean
+        default: true
+      f2fs_opt:
+        description: 'F2FS Optimizations (better flash storage performance)'
+        required: true
+        type: boolean
+        default: false
+      wireguard:
+        description: 'Enable WireGuard VPN support'
+        required: true
+        type: boolean
+        default: true
+      netfilter_full:
+        description: 'Full Netfilter (conntrack, NAT, hashlimit)'
+        required: true
+        type: boolean
+        default: false
+      lrng_enable:
+        description: 'Enable LRNG v60 (better entropy for crypto/gaming)'
+        required: true
+        type: boolean
+        default: false
+      wakelock_blocker:
+        description: 'Enable wakelock GC + limit (better idle battery drain)'
+        required: true
+        type: boolean
+        default: true
+      github_release:
+        description: 'Create GitHub Release'
+        required: true
+        type: boolean
+        default: false
+      ntsync_enable:
+        description: 'Enable NTSync (low-latency NT sync primitives, great for gaming/Wine)'
+        required: true
+        type: boolean
+        default: false
+      droidspaces_enable:
+        description: 'Enable Droidspaces (SYSVIPC + PID_NS + POSIX_MQUEUE for proot-distro)'
+        required: true
+        type: boolean
+        default: true
+      ip_set_enable:
+        description: 'Enable IP_SET + IPv6 NAT (advanced firewall + IPv6 masquerade)'
+        required: true
+        type: boolean
+        default: false
+      ttl_enable:
+        description: 'Enable TTL/HL Target (hide tethering from carrier detection)'
+        required: true
+        type: boolean
+        default: false
+      mem_opt_patches:
+        description: 'Enable memory/scheduler optimization patches (from WildKernels)'
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      ksuver: ${{ steps.ksu_version.outputs.ksuver }}
+      ak3name: ${{ steps.create_zip.outputs.ak3name }}
+      kver: ${{ steps.source.outputs.kver }}
+      gki_branch: ${{ steps.source.outputs.gki_branch }}
+      suffix: ${{ steps.build_name.outputs.suffix }}
+    permissions:
+      actions: write
+      contents: read
+    env:
+      # Inputs are passed to scripts through the environment, never pasted into them.
+      GKI_RELEASE: ${{ inputs.gki_release }}
+      KERNEL_SUFFIX_INPUT: ${{ inputs.kernel_suffix }}
+      IN_SUSFS: ${{ inputs.SUSFS }}
+      IN_LZ4KD: ${{ inputs.lz4kd_enable }}
+      IN_BBR: ${{ inputs.bbr_enable }}
+      IN_BBG: ${{ inputs.baseband_guard }}
+      IN_LTO: ${{ inputs.lto_type }}
+      # Pinned third-party patch sources
+      ADIOS_PATCH_URL: https://raw.githubusercontent.com/firelzrd/adios/6fa79e32d9a33a0d671b108074aca2b5df9cd967/patches/stable/0001-linux6.12.44-ADIOS-3.3.0.patch
+      BORE_PATCH_URL: https://raw.githubusercontent.com/palazik/actions_oplus_sm8750/28f9d3b4c8b5e0fd089b0b74ab47f6530bf78721/patches/bore.patch
+    steps:
+      - name: 🧠 Add swap space (for LTO link)
+        run: |
+          sudo fallocate -l 16G /mnt/swap_lto || sudo dd if=/dev/zero of=/mnt/swap_lto bs=1M count=16384
+          sudo chmod 600 /mnt/swap_lto
+          sudo mkswap /mnt/swap_lto
+          sudo swapon /mnt/swap_lto
+          echo "── swap after ──"; free -h
+
+      - name: 🧹 Free disk space & install dependencies
+        run: |
+          echo "Relocating heavy folders for background deletion..."
+          sudo mv /usr/share/dotnet /usr/share/dotnet_trash 2>/dev/null || true
+          sudo mv /usr/local/lib/android /usr/local/lib/android_trash 2>/dev/null || true
+          sudo mv /opt/ghc /opt/ghc_trash 2>/dev/null || true
+          sudo mv /usr/lib/jvm /usr/lib/jvm_trash 2>/dev/null || true
+          (sudo nice -n 19 ionice -c 3 rm -rf /usr/share/dotnet_trash /usr/local/lib/android_trash /opt/ghc_trash /usr/lib/jvm_trash) &
+
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends -o Dpkg::Use-Pty=0 \
+            libelf-dev libssl-dev pahole cmake aria2 zstd bc bison flex cpio gawk
+
+      - name: 📥 Fetch GKI kernel source
+        id: source
+        run: |
+          case "$GKI_RELEASE" in
+            ${ANDROID_VERSION}-${KERNEL_VERSION}-*) GKI_BRANCH="$GKI_RELEASE" ;;
+            lts) GKI_BRANCH="${ANDROID_VERSION}-${KERNEL_VERSION}-lts" ;;
+            20[0-9][0-9]-[0-1][0-9]) GKI_BRANCH="${ANDROID_VERSION}-${KERNEL_VERSION}-${GKI_RELEASE}" ;;
+            *) GKI_BRANCH="" ;;
+          esac
+          if ! [[ "$GKI_BRANCH" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error::gki_release must be YYYY-MM (e.g. 2026-01), 'lts' or a full ${ANDROID_VERSION}-${KERNEL_VERSION}-* branch name"
+            exit 1
+          fi
+
+          mkdir -p kernel_workspace && cd kernel_workspace
+          for i in 1 2 3; do
+            git clone --depth=1 -b "$GKI_BRANCH" https://android.googlesource.com/kernel/common common && break
+            rm -rf common; sleep $((i * 15))
+          done
+          if [ ! -d common ]; then
+            echo "::warning::android.googlesource.com unreachable, falling back to the GitHub mirror (may lag behind)"
+            git clone --depth=1 -b "$GKI_BRANCH" https://github.com/aosp-mirror/kernel_common common
+          fi
+
+          KVER=$(make -s --no-print-directory -C common kernelversion)
+          ACK_SHA=$(git -C common rev-parse --short=12 HEAD)
+          echo "KVER=$KVER" >> $GITHUB_ENV
+          echo "GKI_BRANCH=$GKI_BRANCH" >> $GITHUB_ENV
+          echo "ACK_SHA=$ACK_SHA" >> $GITHUB_ENV
+          echo "kver=$KVER" >> $GITHUB_OUTPUT
+          echo "gki_branch=$GKI_BRANCH" >> $GITHUB_OUTPUT
+          echo "✅ $GKI_BRANCH @ $ACK_SHA → Linux $KVER"
+
+      - name: Cache Clang
+        id: clang-cache
+        uses: actions/cache@v4
+        with:
+          path: kernel_workspace/zyc-clang
+          key: zyc-clang-19.0.0git-20240723
+
+      - name: Cache build-tools
+        id: buildtools-cache
+        uses: actions/cache@v4
+        with:
+          path: kernel_workspace/build-tools
+          key: codelinaro-build-tools-ks-kernel-lnx-4.0
+
+      - name: Download toolchain
+        working-directory: kernel_workspace
+        run: |
+          # Clang — only download if cache missed
+          if [ "${{ steps.clang-cache.outputs.cache-hit }}" != "true" ]; then
+            echo "Cache miss — downloading ZyCromerZ Clang 19..."
+            mkdir -p zyc-clang
+            aria2c -x16 -s16 -k1M -j16 --retry-wait=5 --max-tries=10 \
+              -d /tmp -o zyc-clang.tar.gz \
+              "https://github.com/ZyCromerZ/Clang/releases/download/19.0.0git-20240723-release/Clang-19.0.0git-20240723.tar.gz"
+            tar -C zyc-clang -zxf /tmp/zyc-clang.tar.gz
+            rm -f /tmp/zyc-clang.tar.gz
+          else
+            echo "Clang restored from cache, skipping download."
+          fi &
+
+          # build-tools — only clone if cache missed
+          if [ "${{ steps.buildtools-cache.outputs.cache-hit }}" != "true" ]; then
+            echo "Cache miss — cloning build-tools..."
+            git clone --depth=1 -b ks-kernel.lnx.4.0.r1-rel \
+              https://git.codelinaro.org/clo/la/kernel/prebuilts/build-tools.git build-tools
+          else
+            echo "build-tools restored from cache, skipping clone."
+          fi &
+
+          wait
+          test -x zyc-clang/bin/clang || { echo "::error::Clang download failed"; exit 1; }
+          test -d build-tools/linux-x86/bin || echo "::warning::build-tools missing, using the runner's host tools"
+
+      - name: Cache ccache-ECS binary
+        uses: actions/cache@v4
+        id: ecs-cache
+        with:
+          path: /tmp/ccache-ecs-bin
+          key: ccache-ecs-${{ runner.os }}-084a7620
+
+      - name: Build & Install ccache-ECS
+        run: |
+          if [ -f /tmp/ccache-ecs-bin/ccache ]; then
+            echo "ECS binary cached, skipping build"
+            sudo cp /tmp/ccache-ecs-bin/ccache /usr/local/bin/ccache
+          else
+            git clone --depth=1 https://github.com/cctv18/ccache-ECS.git /tmp/ccache-ecs
+            cd /tmp/ccache-ecs
+            ./ci/build-binary
+            mkdir -p /tmp/ccache-ecs-bin
+            cp install/ccache /tmp/ccache-ecs-bin/ccache
+            sudo cp /tmp/ccache-ecs-bin/ccache /usr/local/bin/ccache
+          fi
+          sudo chmod 755 /usr/local/bin/ccache
+          echo "/usr/local/bin" >> $GITHUB_PATH
+          echo "✅ ECS ccache: $(/usr/local/bin/ccache --version | head -1)"
+
+      - name: Save ccache-ECS binary cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: /tmp/ccache-ecs-bin
+          key: ccache-ecs-${{ runner.os }}-084a7620
+
+      - name: Configure CCache Directory
+        run: |
+          echo "CCACHE_KEY=ccache-resukisu-gki-${KVER}" >> $GITHUB_ENV
+          echo "CCACHE_DIR=$HOME/.ccache_${KVER}" >> $GITHUB_ENV
+          echo "LDCACHE_DIR=$GITHUB_WORKSPACE/ldcache_${KVER}" >> $GITHUB_ENV
+          echo "KOUT=$GITHUB_WORKSPACE/kout" >> $GITHUB_ENV
+          mkdir -p "$GITHUB_WORKSPACE/ldcache_${KVER}" "$GITHUB_WORKSPACE/kout"
+          echo "CCACHE_MAXSIZE=10G" >> $GITHUB_ENV
+          echo "Current Disk Space:"
+          df -h
+          echo "Current Build Kernel Version: ${KVER}"
+
+      - name: Restore CCache
+        uses: actions/cache/restore@v4
+        id: ccache-restore
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.CCACHE_KEY }}-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ env.CCACHE_KEY }}-${{ runner.os }}-${{ github.ref_name }}-
+            ${{ env.CCACHE_KEY }}-${{ runner.os }}-
+            ${{ env.CCACHE_KEY }}-
+
+      - name: Restore LTO Cache
+        uses: actions/cache/restore@v4
+        if: inputs.lto_type == 'thin'
+        with:
+          path: ${{ env.LDCACHE_DIR }}
+          key: lto-cache-${{ env.KVER }}-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            lto-cache-${{ env.KVER }}-${{ runner.os }}-${{ github.ref_name }}-
+
+      - name: Init and Config CCache
+        run: |
+          mkdir -p "$CCACHE_DIR"
+
+          ccache -M "$CCACHE_MAXSIZE"
+          ccache -o compression=true
+          ccache -o compiler_check=none
+          ccache -o hash_dir=false
+          ccache -o direct_mode=true
+          ccache -o depend_mode=false
+          ccache -o base_dir="$GITHUB_WORKSPACE"
+          ccache -o sloppiness=file_stat_matches,include_file_ctime,include_file_mtime,pch_defines,file_macro,time_macros,locale
+
+          echo "Initial CCache status:"
+          ccache -s
+
+          echo "Updating atime to achieve cache eviction..."
+          find "$CCACHE_DIR" -type f -exec touch -t $(date -d "1 day ago" +%Y%m%d%H%M) {} + || true
+
+      - name: 🧹 Prepare GKI source
+        working-directory: kernel_workspace/common
+        run: |
+          echo "Removing ABI protection & dirty suffix..."
+          # Our Image is not signed with Google's GKI key, so drop the protected-exports
+          # list or the stock (now "unsigned") GKI modules could not export their symbols.
+          rm -f android/abi_gki_protected_exports_*
+          sed -i 's/ -dirty//g' scripts/setlocalversion
+          echo "✅ Source prepared"
+
+      - name: ⚡ Setup ReSukiSU
+        id: ksu_version
+        working-directory: kernel_workspace/common
+        run: |
+          echo "🛠️ Setting up ReSukiSU (main)..."
+          curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash -s main
+          cd KernelSU
+          KSU_VERSION_COUNT=$(git rev-list --count HEAD)
+          KSUVER=$(expr $KSU_VERSION_COUNT + 37185)
+          echo "KSUVER=$KSUVER" >> $GITHUB_ENV
+          echo "ksuver=$KSUVER" >> $GITHUB_OUTPUT
+          echo "✅ ReSukiSU $(git rev-parse --short HEAD) (ver $KSUVER)"
+
+      - name: 🔧 Setup Patches
+        working-directory: kernel_workspace
+        run: |
+          if [ "$IN_SUSFS" == "true" ]; then
+            git clone --depth=1 -b gki-${ANDROID_VERSION}-${KERNEL_VERSION} https://gitlab.com/simonpunk/susfs4ksu.git &
+          fi
+          git clone --depth=1 https://github.com/mrcxlinux/kernel_patches.git &
+          if [ "$IN_LZ4KD" == "true" ]; then
+            git clone --depth=1 https://github.com/ShirkNeko/SukiSU_patch.git &
+          fi
+          git clone --depth=1 https://github.com/palazik/kernel_patches.git wildkernels_patches &
+          wait
+
+          cd ./common
+          if git apply --check -p1 ../kernel_patches/common/EnablePOLLY.patch 2>/dev/null; then
+            git apply -p1 ../kernel_patches/common/EnablePOLLY.patch && echo "✅ POLLY patch applied"
+          else
+            echo "::warning::EnablePOLLY.patch does not apply to $GKI_BRANCH, skipping"
+          fi
+
+          if [ "$IN_SUSFS" == "true" ]; then
+            SUSFS_PATCH="50_add_susfs_in_gki-${ANDROID_VERSION}-${KERNEL_VERSION}.patch"
+            cp ../susfs4ksu/kernel_patches/$SUSFS_PATCH ./
+            cp ../susfs4ksu/kernel_patches/fs/* ./fs/
+            cp ../susfs4ksu/kernel_patches/include/linux/* ./include/linux/
+            # NO 10_ — SukiSU/ReSukiSU have SUSFS KSU-side integration in-source.
+
+            echo "📦 Pre-patch fixups for older GKI releases (only when the anchor is missing)..."
+            # base.c dma-buf (older releases don't include it, the patch context expects it)
+            if ! grep -qxF '#include <linux/dma-buf.h>' ./fs/proc/base.c; then
+              sed -i '/#include <linux\/cpufreq_times.h>/a #include <linux\/dma-buf.h>' ./fs/proc/base.c
+            fi
+            # memory.c zswap
+            if ! grep -qxF '#include <linux/zswap.h>' ./mm/memory.c; then
+              sed -i '/#include <linux\/sched\/sysctl\.h>/a #include <linux\/zswap.h>' ./mm/memory.c
+            fi
+            # task_mmu last_vma_end: expand ONLY if unbraced
+            if grep -qF 'if (vma->vm_end > last_vma_end)' ./fs/proc/task_mmu.c \
+               && ! grep -qF 'if (vma->vm_end > last_vma_end) {' ./fs/proc/task_mmu.c; then
+              perl -i -0pe 's/\t\t\tif \(vma->vm_end > last_vma_end\)\n\t\t\t\tsmap_gather_stats\(vma, &mss, last_vma_end\);/\t\t\tif (vma->vm_end > last_vma_end) {\n\t\t\t\tsmap_gather_stats(vma, \&mss, last_vma_end);\n\t\t\t\tlast_vma_end = vma->vm_end;\n\t\t\t}/' ./fs/proc/task_mmu.c
+            fi
+
+            echo "📦 Applying $SUSFS_PATCH..."
+            if ! patch -p1 --forward --dry-run -s < "$SUSFS_PATCH" > /tmp/susfs_dryrun.log 2>&1; then
+              cat /tmp/susfs_dryrun.log
+              echo "::error::SUSFS patch does not apply cleanly to $GKI_BRANCH (Linux $KVER). Try another gki_release or disable SUSFS."
+              exit 1
+            fi
+            patch -p1 --forward -s < "$SUSFS_PATCH"
+
+            grep -q "SUSFS_IS_INODE_SUS_MAP(file_inode(vma->vm_file))" fs/proc/task_mmu.c \
+              || { echo "❌ SUS_MAP guard missing — real failure"; exit 1; }
+            echo "✅ SUSFS applied"
+          fi
+          echo "✅ Base patches applied"
+
+      - name: ⚙️ Configure Kernel Options
+        working-directory: kernel_workspace
+        run: |
+          DEFCONFIG="./common/arch/arm64/configs/gki_defconfig"
+          echo "CONFIG_KSU=y" >> "$DEFCONFIG"
+          echo "CONFIG_TMPFS_XATTR=y" >> "$DEFCONFIG"
+          echo "CONFIG_TMPFS_POSIX_ACL=y" >> "$DEFCONFIG"
+
+          if [[ "$IN_LZ4KD" == "true" ]]; then
+            echo "CONFIG_CRYPTO_LZ4HC=y" >> "$DEFCONFIG"
+            echo "CONFIG_CRYPTO_LZ4K=y" >> "$DEFCONFIG"
+            echo "CONFIG_CRYPTO_LZ4KD=y" >> "$DEFCONFIG"
+            echo "CONFIG_CRYPTO_842=y" >> "$DEFCONFIG"
+          fi
+
+          echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> "$DEFCONFIG"
+          echo "CONFIG_HEADERS_INSTALL=n" >> "$DEFCONFIG"
+
+          echo "CONFIG_LLVM_POLLY=y" >> "$DEFCONFIG"
+
+          # ReSukiSU custom version name via its format-string config:
+          echo "CONFIG_KSU_FULL_NAME_FORMAT=\"v%KSU_VERSION%-%COMMIT_SHA%@${GITHUB_REPOSITORY_OWNER}\"" >> "$DEFCONFIG"
+
+          # SUSFS on => ReSukiSU auto-selects SuSFS Inline hook. Do NOT set CONFIG_KSU_MANUAL_HOOK.
+          if [ "$IN_SUSFS" == "true" ]; then
+            echo "📦 Enabling SUSFS features..."
+            echo "CONFIG_KSU_SUSFS=y" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$DEFCONFIG"
+          fi
+
+      # The upstream LZ4 1.10.0 patch renames OnePlus-only fs/f2fs/lz4armv8 sources, which
+      # GKI does not have, so only the ZSTD 1.5.7 part is used here.
+      - name: Apply ZSTD 1.5.7 Patch
+        if: inputs.zstd_enable
+        working-directory: kernel_workspace/common
+        run: |
+          # Newer 6.6 stable releases changed an x86-only GCC check the patch context expects
+          cp lib/zstd/common/portability_macros.h /tmp/portability_macros.h.orig
+          sed -i 's/(__GNUC__ >= 11))) \\$/(__GNUC__ >= 5 || (__GNUC__ == 4 \&\& __GNUC_MINOR__ >= 8)))) \\/' lib/zstd/common/portability_macros.h
+          if patch -p1 --forward --dry-run -s < ../kernel_patches/zram/002-zstd.patch > /dev/null 2>&1; then
+            patch -p1 --forward -s < ../kernel_patches/zram/002-zstd.patch
+            echo "✅ ZSTD 1.5.7 applied"
+          else
+            cp /tmp/portability_macros.h.orig lib/zstd/common/portability_macros.h
+            echo "::warning::ZSTD patch does not apply to $GKI_BRANCH, skipping"
+          fi
+
+      - name: Apply LZ4KD Patch
+        if: inputs.lz4kd_enable
+        working-directory: kernel_workspace/common
+        run: |
+          echo "Adding LZ4KD patch..."
+          cp -r ../SukiSU_patch/other/zram/lz4k/include/linux/* ./include/linux/
+          cp -r ../SukiSU_patch/other/zram/lz4k/lib/* ./lib
+          cp -r ../SukiSU_patch/other/zram/lz4k/crypto/* ./crypto
+          LZ4KD_PATCH="../SukiSU_patch/other/zram/zram_patch/${KERNEL_VERSION}/lz4kd.patch"
+          if patch -p1 -F 3 --forward --dry-run -s < "$LZ4KD_PATCH" > /dev/null 2>&1; then
+            patch -p1 -F 3 --forward -s < "$LZ4KD_PATCH"
+            echo "✅ LZ4KD applied"
+          else
+            echo "::warning::LZ4KD patch does not apply to $GKI_BRANCH, skipping"
+          fi
+
+      - name: Configure SchedUtil Optimizations
+        if: inputs.schedutil_opt
+        working-directory: kernel_workspace
+        run: |
+          cat >> common/arch/arm64/configs/gki_defconfig << 'EOF'
+          CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
+          CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=y
+          EOF
+
+      # SM8735: 1x Cortex-X4 + 7x Cortex-A720 (all Armv9.2-A), tune for the A720 majority.
+      # Unlike the SM8750 workflow this does not touch HZ/PREEMPT: the stock vendor modules
+      # are built for the GKI defaults (HZ=250), and changing HZ would skew their timeouts.
+      - name: Prepare CPU Optimizations (Cortex-X4/A720 SM8735)
+        if: inputs.cpu_opt
+        run: |
+          echo "EXTRA_CFLAGS=-mcpu=cortex-a720 -fno-strict-aliasing -fno-delete-null-pointer-checks" >> $GITHUB_ENV
+          echo "✅ Cortex-A720 flags prepared."
+
+      - name: Apply Unicode Bypass Fix
+        working-directory: kernel_workspace/common
+        run: |
+          UB_FIX="../wildkernels_patches/common/unicode_bypass_fix_6.1+.patch"
+          if patch -p1 --forward --dry-run -s < "$UB_FIX" > /dev/null 2>&1; then
+            patch -p1 --forward -s < "$UB_FIX"
+            echo "✅ Unicode fix applied"
+          else
+            echo "::warning::Unicode bypass fix does not apply to $GKI_BRANCH, skipping"
+          fi
+
+      - name: Apply BORE Scheduler
+        if: inputs.bore_enable
+        working-directory: kernel_workspace/common
+        run: |
+          wget -qO /tmp/bore.patch "$BORE_PATCH_URL"
+          cp kernel/sched/fair.c /tmp/fair.c.orig
+          # The patch context expects the 0.70ms EEVDF base slice of newer releases;
+          # older GKI releases still use 0.75ms.
+          sed -i -e 's/(default: 0\.75 msec \* (1 + ilog(ncpus)), units: nanoseconds)/(default: 0.70 msec * (1 + ilog(ncpus)), units: nanoseconds)/' \
+                 -e 's/^\(unsigned int sysctl_sched_base_slice\s*=\s*\)750000ULL;/\1700000ULL;/' \
+                 -e 's/^\(static unsigned int normalized_sysctl_sched_base_slice\s*=\s*\)750000ULL;/\1700000ULL;/' \
+                 kernel/sched/fair.c
+          if patch -p1 -F 3 --forward --dry-run -s < /tmp/bore.patch > /tmp/bore_dryrun.log 2>&1; then
+            patch -p1 -F 3 --forward -s < /tmp/bore.patch
+            echo "CONFIG_SCHED_BORE=y" >> arch/arm64/configs/gki_defconfig
+            echo "✅ BORE scheduler applied"
+          else
+            cat /tmp/bore_dryrun.log
+            echo "::warning::BORE patch does not apply to $GKI_BRANCH, skipping"
+            cp /tmp/fair.c.orig kernel/sched/fair.c
+          fi
+
+      - name: Apply Memory & Scheduler Optimization Patches
+        if: inputs.mem_opt_patches
+        working-directory: kernel_workspace/common
+        run: |
+          echo "Applying WildKernels optimization patches..."
+          PATCHES_DIR="../wildkernels_patches/common"
+
+          # Only apply patches that apply cleanly, so a conflicting one can't leave half its hunks behind.
+          apply_patch() {
+            local patch="$1"
+            if [ ! -f "$PATCHES_DIR/$patch" ]; then
+              echo "⚠️ $patch not found, skipping"
+            elif patch -p1 --forward --dry-run -s < "$PATCHES_DIR/$patch" > /dev/null 2>&1; then
+              patch -p1 --forward -s < "$PATCHES_DIR/$patch" && echo "✅ $patch"
+            else
+              echo "⚠️ $patch (skipped/conflict)"
+            fi
+          }
+
+          apply_patch "optimized_mem_operations.patch"
+          apply_patch "file_struct_8bytes_align.patch"
+          apply_patch "reduce_cache_pressure.patch"
+          apply_patch "mem_opt_prefetch.patch"
+          apply_patch "optimise_memcmp.patch"
+          apply_patch "minimise_wakeup_time.patch"
+          apply_patch "int_sqrt.patch"
+          apply_patch "force_tcp_nodelay.patch"
+          apply_patch "reduce_gc_thread_sleep_time.patch"
+          apply_patch "add_timeout_wakelocks_globally.patch"
+          apply_patch "f2fs_reduce_congestion.patch"
+          apply_patch "reduce_freeze_timeout.patch"
+          apply_patch "clear_page_16bytes_align.patch"
+          apply_patch "add_limitation_scaling_min_freq.patch"
+          apply_patch "re_write_limitation_scaling_min_freq.patch"
+          apply_patch "adjust_cpu_scan_order.patch"
+          apply_patch "avoid_extra_s2idle_wake_attempts.patch"
+          apply_patch "disable_cache_hot_buddy.patch"
+          apply_patch "f2fs_enlarge_min_fsync_blocks.patch"
+          apply_patch "increase_ext4_default_commit_age.patch"
+          apply_patch "increase_sk_mem_packets.patch"
+          apply_patch "reduce_pci_pme_wakeups.patch"
+          apply_patch "silence_irq_cpu_logspam.patch"
+          apply_patch "silence_system_logspam.patch"
+          apply_patch "use_unlikely_wrap_cpufreq.patch"
+
+          echo "✅ Optimization patches applied"
+
+      - name: Apply NTSync Patch
+        if: inputs.ntsync_enable
+        working-directory: kernel_workspace/common
+        run: |
+          echo "Enabling NTSync (NT kernel sync primitives)..."
+          NTSYNC_DIR="../wildkernels_patches/common/ntsync"
+          for p in "ntsync_compat_${ANDROID_VERSION}-${KERNEL_VERSION}.patch" "ntsync_base.patch"; do
+            if patch -p1 --forward --dry-run -s < "$NTSYNC_DIR/$p" > /dev/null 2>&1; then
+              patch -p1 --forward -s < "$NTSYNC_DIR/$p" && echo "✅ $p"
+            else
+              echo "::warning::$p does not apply to $GKI_BRANCH. Skipping NTSync."
+              exit 0
+            fi
+          done
+          echo "CONFIG_NTSYNC=y" >> arch/arm64/configs/gki_defconfig
+          echo "✅ NTSync enabled"
+
+      - name: Add Droidspaces Support
+        if: inputs.droidspaces_enable
+        working-directory: kernel_workspace/common
+        run: |
+          echo "Enabling Droidspaces (portable Linux containers)..."
+          # CONFIG_SYSVIPC grows task_struct; move its fields into the free
+          # ANDROID_KABI_RESERVE(6..8) slots so the stock vendor modules keep working.
+          KABI_FIX="../wildkernels_patches/common/droidspaces/fix_sysvipc_kabi_6_7_8.patch"
+          if patch -p1 --forward --dry-run -s < "$KABI_FIX" > /dev/null 2>&1; then
+            patch -p1 --forward -s < "$KABI_FIX"
+          else
+            echo "::warning::SYSVIPC KABI fix does not apply to $GKI_BRANCH. Skipping Droidspaces to keep the KMI intact."
+            exit 0
+          fi
+
+          cat >> arch/arm64/configs/gki_defconfig << 'EOF'
+          CONFIG_SYSVIPC=y
+          CONFIG_DEVTMPFS=y
+          CONFIG_PID_NS=y
+          CONFIG_POSIX_MQUEUE=y
+          CONFIG_NETFILTER_XT_TARGET_LOG=y
+          CONFIG_NETFILTER_XT_MATCH_RECENT=y
+          EOF
+          echo "✅ Droidspaces support enabled"
+
+      - name: Add IP_SET + IPv6 NAT Support
+        if: inputs.ip_set_enable
+        working-directory: kernel_workspace/common
+        run: |
+          echo "Enabling IP_SET + IPv6 NAT..."
+          echo "CONFIG_BPF_STREAM_PARSER=y" >> arch/arm64/configs/gki_defconfig
+          cat >> arch/arm64/configs/gki_defconfig << 'EOF'
+          CONFIG_IP_SET=y
+          CONFIG_IP_SET_MAX=65534
+          CONFIG_IP_SET_BITMAP_IP=y
+          CONFIG_IP_SET_BITMAP_IPMAC=y
+          CONFIG_IP_SET_BITMAP_PORT=y
+          CONFIG_IP_SET_HASH_IP=y
+          CONFIG_IP_SET_HASH_IPMARK=y
+          CONFIG_IP_SET_HASH_IPPORT=y
+          CONFIG_IP_SET_HASH_IPPORTIP=y
+          CONFIG_IP_SET_HASH_IPPORTNET=y
+          CONFIG_IP_SET_HASH_IPMAC=y
+          CONFIG_IP_SET_HASH_MAC=y
+          CONFIG_IP_SET_HASH_NETPORTNET=y
+          CONFIG_IP_SET_HASH_NET=y
+          CONFIG_IP_SET_HASH_NETNET=y
+          CONFIG_IP_SET_HASH_NETPORT=y
+          CONFIG_IP_SET_HASH_NETIFACE=y
+          CONFIG_IP_SET_LIST_SET=y
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+          CONFIG_NETFILTER_XT_SET=y
+          CONFIG_IP6_NF_NAT=y
+          CONFIG_IP6_NF_TARGET_MASQUERADE=y
+          EOF
+
+          # IPv6 NAT fix from WildKernels
+          IPNAT_FIX="../wildkernels_patches/common/IPv6_NAT_FIX.patch"
+          if patch -p1 -F 3 --forward --dry-run -s < "$IPNAT_FIX" > /dev/null 2>&1; then
+            patch -p1 -F 3 --forward -s < "$IPNAT_FIX"
+            echo "✅ IPv6 NAT fix applied"
+          else
+            echo "⚠️ IPv6_NAT_FIX.patch does not apply, skipping"
+          fi
+          echo "✅ IP_SET + IPv6 NAT enabled"
+
+      - name: Add TTL/HL Target Support
+        if: inputs.ttl_enable
+        working-directory: kernel_workspace/common
+        run: |
+          echo "Enabling TTL/HL Target (hide tethering from carrier)..."
+          cat >> arch/arm64/configs/gki_defconfig << 'EOF'
+          CONFIG_IP_NF_TARGET_TTL=y
+          CONFIG_IP6_NF_TARGET_HL=y
+          CONFIG_IP6_NF_MATCH_HL=y
+          EOF
+          echo "✅ TTL/HL Target enabled"
+
+      - name: F2FS Optimizations
+        if: inputs.f2fs_opt
+        working-directory: kernel_workspace
+        run: |
+          cat >> common/arch/arm64/configs/gki_defconfig << 'EOF'
+          CONFIG_F2FS_FS=y
+          CONFIG_F2FS_STAT_FS=y
+          CONFIG_F2FS_FS_XATTR=y
+          CONFIG_F2FS_FS_POSIX_ACL=y
+          CONFIG_F2FS_FS_SECURITY=y
+          CONFIG_F2FS_FS_COMPRESSION=y
+          CONFIG_F2FS_FS_LZO=y
+          CONFIG_F2FS_FS_LZ4=y
+          CONFIG_F2FS_FS_ZSTD=y
+          EOF
+
+      - name: Enable WireGuard
+        if: inputs.wireguard
+        working-directory: kernel_workspace
+        run: |
+          echo "CONFIG_WIREGUARD=y" >> common/arch/arm64/configs/gki_defconfig
+
+      - name: Enable Full Netfilter
+        if: inputs.netfilter_full
+        working-directory: kernel_workspace
+        run: |
+          cat >> common/arch/arm64/configs/gki_defconfig << 'EOF'
+          CONFIG_NF_CONNTRACK=y
+          CONFIG_NF_CONNTRACK_MARK=y
+          CONFIG_NF_CONNTRACK_ZONES=y
+          CONFIG_NF_CONNTRACK_TIMESTAMP=y
+          CONFIG_NF_CONNTRACK_EVENTS=y
+          CONFIG_NF_CONNTRACK_TIMEOUT=y
+          CONFIG_NF_CONNTRACK_LABELS=y
+          CONFIG_NF_NAT=y
+          CONFIG_NF_NAT_MASQUERADE=y
+          CONFIG_NETFILTER_XT_MATCH_HASHLIMIT=y
+          CONFIG_NETFILTER_XT_MATCH_CONNTRACK=y
+          CONFIG_NETFILTER_XT_MATCH_CONNLIMIT=y
+          CONFIG_NETFILTER_XT_MATCH_STATE=y
+          CONFIG_NETFILTER_XT_TARGET_MASQUERADE=y
+          CONFIG_NETFILTER_XT_TARGET_REDIRECT=y
+          EOF
+
+      - name: Enable LRNG v60
+        if: inputs.lrng_enable
+        working-directory: kernel_workspace/common
+        run: |
+          echo "Enabling LRNG v60..."
+          LRNG_PATCH="../wildkernels_patches/common/lrng/lrng_v60_${ANDROID_VERSION}-${KERNEL_VERSION}.patch"
+          if patch -p1 --forward --dry-run -s < "$LRNG_PATCH" > /dev/null 2>&1; then
+            patch -p1 --forward -s < "$LRNG_PATCH"
+          else
+            echo "::warning::LRNG patch does not apply to $GKI_BRANCH, skipping"
+            exit 0
+          fi
+          # RANDOM_DEFAULT_IMPL=n makes LRNG replace random.c (it exports the same API),
+          # otherwise the IRQ entropy source and health tests can't be enabled.
+          cat >> arch/arm64/configs/gki_defconfig << 'EOF'
+          CONFIG_RANDOM_DEFAULT_IMPL=n
+          CONFIG_LRNG=y
+          CONFIG_LRNG_SHA256=y
+          CONFIG_LRNG_COLLECTION_SIZE_1024=y
+          CONFIG_LRNG_HEALTH_TESTS=y
+          CONFIG_LRNG_RCT_CUTOFF=31
+          CONFIG_LRNG_APT_CUTOFF=325
+          CONFIG_LRNG_IRQ=y
+          CONFIG_LRNG_CONTINUOUS_COMPRESSION_ENABLED=y
+          EOF
+          echo "✅ LRNG applied"
+
+      - name: Enable Wakelock GC + Limit
+        if: inputs.wakelock_blocker
+        working-directory: kernel_workspace/common
+        run: |
+          cat >> arch/arm64/configs/gki_defconfig << 'EOF'
+          CONFIG_PM_WAKELOCKS=y
+          CONFIG_PM_WAKELOCKS_GC=y
+          CONFIG_PM_WAKELOCKS_LIMIT=100
+          EOF
+
+      - name: Configure BBR
+        working-directory: kernel_workspace
+        run: |
+          if [[ "$IN_BBR" != "false" ]]; then
+            DEFCONFIG=./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_TCP_CONG_ADVANCED=y" >> $DEFCONFIG
+            echo "CONFIG_TCP_CONG_BBR=y" >> $DEFCONFIG
+            echo "CONFIG_TCP_CONG_CUBIC=y" >> $DEFCONFIG
+            echo "CONFIG_TCP_CONG_VEGAS=y" >> $DEFCONFIG
+            echo "CONFIG_TCP_CONG_NV=y" >> $DEFCONFIG
+            echo "CONFIG_TCP_CONG_WESTWOOD=y" >> $DEFCONFIG
+            echo "CONFIG_TCP_CONG_HTCP=y" >> $DEFCONFIG
+            echo "CONFIG_NET_SCH_FQ=y" >> $DEFCONFIG
+            echo "CONFIG_NET_SCH_FQ_CODEL=y" >> $DEFCONFIG
+            if [[ "$IN_BBR" == "default" ]]; then
+              echo "CONFIG_DEFAULT_BBR=y" >> $DEFCONFIG
+            else
+              echo "CONFIG_DEFAULT_CUBIC=y" >> $DEFCONFIG
+            fi
+          fi
+
+      - name: Apply BBRv3
+        working-directory: kernel_workspace/common
+        run: |
+          echo "::group::Apply BBRv3 patches"
+          BBRV3_PATCH="../wildkernels_patches/common/bbrv3/0001-net-tcp-backport-BBRv3-to-${ANDROID_VERSION}-${KERNEL_VERSION}.patch"
+          if [ -f "$BBRV3_PATCH" ] && patch -p1 -F 3 --forward --dry-run -s < "$BBRV3_PATCH" > /dev/null 2>&1; then
+            patch -p1 -F 3 --forward -s < "$BBRV3_PATCH"
+            echo "CONFIG_TCP_CONG_ADVANCED=y" >> arch/arm64/configs/gki_defconfig
+            echo "CONFIG_TCP_CONG_BBR3=y"     >> arch/arm64/configs/gki_defconfig
+            echo "✅ BBRv3 patch applied"
+          else
+            echo "::warning::BBRv3 patch missing or does not apply to $GKI_BRANCH — skipping"
+          fi
+          echo "::endgroup::"
+
+      - name: Configure LTO
+        working-directory: kernel_workspace
+        run: |
+          if [[ "$IN_LTO" == "none" ]]; then
+            echo "CONFIG_LTO_NONE=y" >> ./common/arch/arm64/configs/gki_defconfig
+          elif [[ "$IN_LTO" == "full" ]]; then
+            echo "CONFIG_LTO_CLANG_FULL=y" >> ./common/arch/arm64/configs/gki_defconfig
+          else
+            echo "CONFIG_LTO_CLANG_THIN=y" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+
+      # ADIOS only ships patches for 6.12+. Its scheduler code builds on 6.6 with one
+      # fix; the 6.12 "default scheduler" hunk is re-done for the 6.6 elevator code.
+      - name: Apply ADIOS IO Scheduler
+        if: inputs.adios_enable
+        working-directory: kernel_workspace/common
+        run: |
+          wget -qO /tmp/adios_full.patch "$ADIOS_PATCH_URL"
+          awk '/^diff --git /{skip = ($3 == "a/block/elevator.c")} !skip' /tmp/adios_full.patch > /tmp/adios.patch
+          if ! patch -p1 --forward --dry-run -s < /tmp/adios.patch > /dev/null 2>&1; then
+            echo "::warning::ADIOS patch does not apply to $GKI_BRANCH, skipping"
+            exit 0
+          fi
+          patch -p1 --forward -s < /tmp/adios.patch
+
+          # 6.12 moved the rotational flag into queue_limits.features
+          if ! grep -q BLK_FEAT_ROTATIONAL include/linux/blkdev.h; then
+            sed -i 's/!!(q->limits\.features & BLK_FEAT_ROTATIONAL)/!blk_queue_nonrot(q)/' block/adios.c
+          fi
+
+          # Make ADIOS the default scheduler when CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y
+          perl -0pi -e 's/(static struct elevator_type \*elevator_get_default\(struct request_queue \*q\)\n\{\n(?:.*\n)*?)(\tif \(q->nr_hw_queues != 1 &&)/$1#ifdef CONFIG_MQ_IOSCHED_DEFAULT_ADIOS\n\treturn elevator_find_get(q, "adios");\n#endif\n\n$2/' block/elevator.c
+          grep -q 'elevator_find_get(q, "adios")' block/elevator.c \
+            || { echo "::error::Could not hook ADIOS into elevator_get_default()"; exit 1; }
+
+          echo "CONFIG_MQ_IOSCHED_ADIOS=y" >> arch/arm64/configs/gki_defconfig
+          echo "CONFIG_MQ_IOSCHED_DEFAULT_ADIOS=y" >> arch/arm64/configs/gki_defconfig
+          echo "✅ ADIOS applied"
+
+      - name: Configure Baseband Guard
+        if: inputs.baseband_guard
+        working-directory: kernel_workspace/common
+        run: |
+          echo "CONFIG_BBG=y" >> ./arch/arm64/configs/gki_defconfig
+          curl -sSL https://raw.githubusercontent.com/cctv18/Baseband-guard/master/setup.sh | bash
+          sed -i '/^config LSM$/,/^[[:space:]]*help/{ /^[[:space:]]*default/ { /baseband_guard/! s/selinux/selinux,baseband_guard/ } }' security/Kconfig
+
+      - name: 📦 Add build name
+        id: build_name
+        working-directory: kernel_workspace/common
+        run: |
+          SUFFIX="${KERNEL_SUFFIX_INPUT:-$GITHUB_REPOSITORY_OWNER}"
+          SUFFIX=$(printf '%s' "$SUFFIX" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//')
+          [ -n "$SUFFIX" ] || SUFFIX="ReSukiSU"
+          if grep -q '^CONFIG_LOCALVERSION=' arch/arm64/configs/gki_defconfig; then
+            sed -i "s/^CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=\"-${SUFFIX}\"/" arch/arm64/configs/gki_defconfig
+          else
+            echo "CONFIG_LOCALVERSION=\"-${SUFFIX}\"" >> arch/arm64/configs/gki_defconfig
+          fi
+          sed -i 's/${scm_version}//' scripts/setlocalversion
+          echo "CONFIG_LOCALVERSION_AUTO=n" >> arch/arm64/configs/gki_defconfig
+          echo "KERNEL_SUFFIX=$SUFFIX" >> $GITHUB_ENV
+          echo "suffix=$SUFFIX" >> $GITHUB_OUTPUT
+          echo "✅ uname -r will be ${KVER}-${SUFFIX}"
+
+      - name: 🧾 Generate .config & verify features
+        working-directory: kernel_workspace/common
+        run: |
+          # Shared make invocation for this and the build step
+          KWS="$GITHUB_WORKSPACE/kernel_workspace"
+          cat > "$KWS/ld-wrapper" << EOF
+          #!/bin/bash
+          exec ld.lld "\$@" --thinlto-cache-dir=$LDCACHE_DIR --thinlto-jobs=$(($(nproc --all) / 2))
+          EOF
+          cat > "$KWS/kmake" << 'EOF'
+          #!/bin/bash
+          KWS="$GITHUB_WORKSPACE/kernel_workspace"
+          export PATH="$KWS/zyc-clang/bin:$KWS/build-tools/linux-x86/bin:$PATH"
+          MAP="-fdebug-prefix-map=${GITHUB_WORKSPACE}=. -fmacro-prefix-map=${GITHUB_WORKSPACE}=. -ffile-prefix-map=${GITHUB_WORKSPACE}=."
+          exec make -j$(nproc --all) LLVM=1 LLVM_IAS=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            CC="ccache clang" LD="$KWS/ld-wrapper" HOSTLD="$KWS/ld-wrapper" \
+            O="$KOUT" \
+            KCFLAGS="-O2 -pipe -Wno-error -Wno-implicit-function-declaration -Wno-implicit-int -Wno-default-const-init-var-unsafe -Wno-format -Wno-unknown-warning-option ${EXTRA_CFLAGS:-} ${MAP}" \
+            "$@"
+          EOF
+          chmod +x "$KWS/ld-wrapper" "$KWS/kmake"
+
+          echo "Clang: $("$KWS/zyc-clang/bin/clang" --version | head -n 1)"
+          echo "LLD:   $("$KWS/zyc-clang/bin/ld.lld" --version | head -n 1)"
+          pahole --version 2>/dev/null || echo "Pahole: Not Installed"
+
+          "$KWS/kmake" gki_defconfig
+
+          # Every option this workflow added to gki_defconfig must survive Kconfig,
+          # otherwise the feature silently isn't there (missing patch, unmet dependency...).
+          declare -A want
+          while IFS= read -r line; do
+            want["${line%%=*}"]="${line#*=}"
+          done < <(git diff -U0 -- arch/arm64/configs/gki_defconfig | sed -n 's/^+\(CONFIG_[A-Za-z0-9_]*=.*\)$/\1/p')
+
+          dropped=()
+          for sym in $(printf '%s\n' "${!want[@]}" | sort); do
+            val="${want[$sym]}"
+            got=$(sed -n "s/^$sym=//p" "$KOUT/.config")
+            if [ "$val" = "n" ]; then
+              [ -z "$got" ] || [ "$got" = "n" ] || dropped+=("$sym=$val (got $got)")
+            elif [ "$got" != "$val" ]; then
+              dropped+=("$sym=$val (got ${got:-not set})")
+            fi
+          done
+          if [ "$IN_BBG" == "true" ] && ! grep -q '^CONFIG_LSM=.*baseband_guard' "$KOUT/.config"; then
+            dropped+=("CONFIG_LSM contains baseband_guard (got $(sed -n 's/^CONFIG_LSM=//p' "$KOUT/.config"))")
+          fi
+
+          {
+            echo "### Kernel config: $GKI_BRANCH ($KVER)"
+            echo "Requested options: ${#want[@]}, not applied: ${#dropped[@]}"
+            for d in "${dropped[@]}"; do echo "- \`$d\`"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+          for d in "${dropped[@]}"; do echo "::warning::Config option not applied: $d"; done
+
+          grep -q '^CONFIG_KSU=y' "$KOUT/.config" || { echo "::error::CONFIG_KSU is not enabled"; exit 1; }
+          if [ "$IN_SUSFS" == "true" ]; then
+            grep -q '^CONFIG_KSU_SUSFS=y' "$KOUT/.config" || { echo "::error::CONFIG_KSU_SUSFS is not enabled"; exit 1; }
+          fi
+
+      - name: 🔨 Build Kernel
+        working-directory: kernel_workspace/common
+        run: |
+          set -o pipefail
+          export CCACHE_LOGFILE="$GITHUB_WORKSPACE/kernel_workspace/ccache.log"
+          export CCACHE_IS_KERNEL_COMPILING=true
+
+          "$GITHUB_WORKSPACE/kernel_workspace/kmake" Image 2>&1 | tee "$GITHUB_WORKSPACE/kernel_workspace/build.log"
+
+          echo "Kernel Compilation Complete!"
+          strings "$KOUT/arch/arm64/boot/Image" | grep -m1 "Linux version" || true
+          ccache -c
+          ccache --evict-older-than 10800s
+          echo "CCache Status:"
+          ccache -s
+          df -h
+
+      - name: 📦 Save New CCache
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ env.CCACHE_KEY }}-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: 📦 Save LTO CCache
+        if: success() && inputs.lto_type == 'thin'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.LDCACHE_DIR }}
+          key: lto-cache-${{ env.KVER }}-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+
+      - name: 🧠 Package AK3 ZIP
+        id: create_zip
+        working-directory: kernel_workspace
+        run: |
+          git clone https://github.com/palazik/AnyKernel3 --depth=1
+          rm -rf ./AnyKernel3/.git
+          cd AnyKernel3
+          # Generic AK3 (no device check, flashes the boot partition): only relabel it
+          sed -i "s/^kernel.string=.*/kernel.string=ReSukiSU GKI ${KVER}-${KERNEL_SUFFIX} for ${DEVICE_NAME} (${DEVICE_CODENAME})/" anykernel.sh
+          cp "$KOUT/arch/arm64/boot/Image" ./Image
+          if [[ ! -f ./Image ]]; then
+            echo "Kernel Image not found, build may have failed."
+            exit 1
+          fi
+          KSU_TYPENAME="ReSukiSU"
+          AK3_NAME="AnyKernel3_${KSU_TYPENAME}_${KSUVER}_${KVER}-${KERNEL_SUFFIX}_POCO-F7.zip"
+          FULL_VERSION="${KVER}-${KERNEL_SUFFIX}"
+          zip -r ../$AK3_NAME ./*
+          echo "ak3name=$AK3_NAME" >> $GITHUB_OUTPUT
+
+          TIME_NOW="$(date +'%Y-%m-%d %H:%M:%S %Z')"
+          {
+            echo "Author: $GITHUB_ACTOR"
+            echo "Repo: $GITHUB_REPOSITORY"
+            echo "Branch: $GITHUB_REF_NAME"
+            echo "Run ID: $GITHUB_RUN_ID"
+            echo "Commit: $GITHUB_SHA"
+            echo "Time: $TIME_NOW"
+            echo "Device: $DEVICE_NAME ($DEVICE_CODENAME) / $SOC_NAME"
+            echo "GKI: $GKI_BRANCH @ $ACK_SHA"
+            echo "Kernel Ver: $FULL_VERSION"
+            echo "KSU Branch: ${KSU_TYPENAME}"
+            echo "KSU Ver: ${KSUVER}"
+            echo "SuSFS: ${{ inputs.SUSFS }}"
+            echo "ZSTD: ${{ inputs.zstd_enable }}"
+            echo "LZ4KD: ${{ inputs.lz4kd_enable }}"
+            echo "BBR: ${{ inputs.bbr_enable }}"
+            echo "BBRv3: true (stock)"
+            echo "ADIOS: ${{ inputs.adios_enable }}"
+            echo "BBG: ${{ inputs.baseband_guard }}"
+            echo "NTSync: ${{ inputs.ntsync_enable }}"
+            echo "Droidspaces: ${{ inputs.droidspaces_enable }}"
+            echo "IP_SET+IPv6NAT: ${{ inputs.ip_set_enable }}"
+            echo "TTL: ${{ inputs.ttl_enable }}"
+            echo "MemOpt: ${{ inputs.mem_opt_patches }}"
+            echo "BORE: ${{ inputs.bore_enable }}"
+          } > ./ak3.log
+          zip -z ../$AK3_NAME < ./ak3.log
+
+      - name: 📤 Upload AnyKernel3
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.create_zip.outputs.ak3name }}
+          path: ${{ github.workspace }}/kernel_workspace/AnyKernel*.zip
+
+      - name: Send Telegram Notification (Success)
+        if: success()
+        env:
+          TELEGRAPH_TOKEN: ${{ secrets.TELEGRAPH_TOKEN }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "Telegram secrets not set, skipping notification."
+            exit 0
+          fi
+          DATE=$(date +"%Y-%m-%d %H:%M:%S %Z")
+          COMMIT_HASH=$(echo "$GITHUB_SHA" | cut -c1-8)
+          COMMIT_MSG="Workflow Dispatch: $GKI_BRANCH ($KVER)"
+          REPO_URL="https://github.com/$GITHUB_REPOSITORY"
+          RUN_URL="$REPO_URL/actions/runs/$GITHUB_RUN_ID"
+
+          export TG_KERNEL_VERSION="$KVER"
+          export TG_KSU_DISPLAY="ReSukiSU"
+          export TG_KSUVER="$KSUVER"
+          export TG_SUFFIX="$KERNEL_SUFFIX"
+          export TG_LTO="${{ inputs.lto_type }}"
+          export TG_BUILD_NUM="$GITHUB_RUN_NUMBER"
+          export TG_TIME_NOW="$DATE"
+          export TG_RUN_URL="$RUN_URL"
+          export TG_REPO="$GITHUB_REPOSITORY"
+          export TG_OWNER="$GITHUB_REPOSITORY_OWNER"
+          export TG_SUSFS="${{ inputs.SUSFS }}"
+          export TG_BBR="${{ inputs.bbr_enable }}"
+          export TG_BBR3="true"
+          export TG_ADIOS="${{ inputs.adios_enable }}"
+          export TG_BBG="${{ inputs.baseband_guard }}"
+          export TG_ZSTD="${{ inputs.zstd_enable }}"
+          export TG_LZ4KD="${{ inputs.lz4kd_enable }}"
+          export TG_MM="true"
+          export TG_UFIX="true"
+          export TG_BORE="${{ inputs.bore_enable }}"
+          export TG_SCHED="${{ inputs.schedutil_opt }}"
+          export TG_CLANG="ZyCromerZ-19"
+          export TG_CPU_OPT="${{ inputs.cpu_opt }}"
+          export TG_F2FS="${{ inputs.f2fs_opt }}"
+          export TG_WG="${{ inputs.wireguard }}"
+          export TG_LRNG="${{ inputs.lrng_enable }}"
+          export TG_WLB="${{ inputs.wakelock_blocker }}"
+          export TG_NTSYNC="${{ inputs.ntsync_enable }}"
+          export TG_DROIDSPACES="${{ inputs.droidspaces_enable }}"
+          export TG_IP_SET="${{ inputs.ip_set_enable }}"
+          export TG_TTL="${{ inputs.ttl_enable }}"
+          export TG_MEM_OPT="${{ inputs.mem_opt_patches }}"
+
+          TELEGRAPH_URL=$(python3 << 'PYEOF'
+          import json, urllib.request, urllib.parse, os, sys
+
+          e = os.environ.get
+
+          def feat(val, name):
+              icon = "✅" if val == "true" else "❌"
+              return {"tag": "li", "children": [f"{icon} {name}"]}
+
+          content = [
+              {"tag": "h3", "children": [f"{e('DEVICE_NAME')} ({e('DEVICE_CODENAME')}) — ReSukiSU GKI kernel"]},
+              {"tag": "hr"},
+              {"tag": "h4", "children": ["📋 Build Info"]},
+              {"tag": "ul", "children": [
+                  {"tag": "li", "children": [{"tag": "strong", "children": ["Device: "]}, f"{e('DEVICE_NAME')} / {e('SOC_NAME')}"]},
+                  {"tag": "li", "children": [{"tag": "strong", "children": ["Kernel: "]}, f"{e('TG_KERNEL_VERSION')}-{e('TG_SUFFIX')} ({e('GKI_BRANCH')} @ {e('ACK_SHA')})"]},
+                  {"tag": "li", "children": [{"tag": "strong", "children": ["Manager: "]}, f"{e('TG_KSU_DISPLAY')} v{e('TG_KSUVER')}"]},
+                  {"tag": "li", "children": [{"tag": "strong", "children": ["LTO: "]}, e("TG_LTO")]},
+                  {"tag": "li", "children": [{"tag": "strong", "children": ["Clang: "]}, e("TG_CLANG")]},
+                  {"tag": "li", "children": [{"tag": "strong", "children": ["Build #: "]}, e("TG_BUILD_NUM")]},
+                  {"tag": "li", "children": [{"tag": "strong", "children": ["Time: "]}, e("TG_TIME_NOW")]}
+              ]},
+              {"tag": "hr"},
+              {"tag": "h4", "children": ["⚡ Features"]},
+              {"tag": "ul", "children": [
+                  feat(e("TG_SUSFS"),   "SuSFS"),
+                  feat("true" if e("TG_BBR") != "false" else "false", f"BBR ({e('TG_BBR')})"),
+                  feat(e("TG_BBR3"), "BBRv3 TCP Congestion Control"),
+                  feat(e("TG_ADIOS"),   "ADIOS IO Scheduler"),
+                  feat(e("TG_BBG"),     "Baseband Guard"),
+                  feat(e("TG_ZSTD"),    "ZSTD 1.5.7"),
+                  feat(e("TG_LZ4KD"),  "LZ4KD ZRAM"),
+                  feat(e("TG_MM"),      "Multi-Manager Support"),
+                  feat(e("TG_UFIX"),    "Unicode Bypass Fix"),
+                  feat(e("TG_BORE"),    "BORE Scheduler (EEVDF burst enhancer)"),
+                  feat(e("TG_SCHED"),  "SchedUtil Optimizations"),
+                  feat(e("TG_CPU_OPT"),"Cortex-X4/A720 CPU Optimizations"),
+                  feat(e("TG_F2FS"),   "F2FS Optimizations"),
+                  feat(e("TG_WG"),     "WireGuard VPN kernel level support"),
+                  feat(e("TG_LRNG"),   "LRNG v60"),
+                  feat(e("TG_WLB"),    "Wakelock GC + limit"),
+                  feat(e("TG_NTSYNC"),      "NTSync (NT sync primitives)"),
+                  feat(e("TG_DROIDSPACES"), "Droidspaces (proot-distro support)"),
+                  feat(e("TG_IP_SET"),      "IP_SET + IPv6 NAT"),
+                  feat(e("TG_TTL"),         "TTL/HL Target (hide tethering)"),
+                  feat(e("TG_MEM_OPT"),     "Memory & Scheduler Optimizations"),
+              ]},
+              {"tag": "hr"},
+              {"tag": "h4", "children": ["📥 Installation"]},
+              {"tag": "ol", "children": [
+                  {"tag": "li", "children": ["Back up your stock boot.img first"]},
+                  {"tag": "li", "children": ["Flash AnyKernel3 zip via recovery or Kernel Flasher"]},
+                  {"tag": "li", "children": ["Install metamodule: mountify / meta-overlayfs / meta-magicmount"]},
+              ]},
+              {"tag": "hr"},
+              {"tag": "p", "children": [
+                  {"tag": "a", "attrs": {"href": e("TG_RUN_URL")}, "children": ["🔗 GitHub Actions Run"]},
+                  "  |  ",
+                  {"tag": "a", "attrs": {"href": f"https://github.com/{e('TG_REPO')}"}, "children": [f"📦 {e('TG_REPO')}"]},
+              ]},
+              {"tag": "p", "children": [f"Built by @{e('TG_OWNER')}"]},
+          ]
+
+          data = {
+              "access_token": os.environ.get("TELEGRAPH_TOKEN", ""),
+              "title": f"{e('DEVICE_NAME')} ReSukiSU {e('TG_KERNEL_VERSION')}-{e('TG_SUFFIX')} #{e('TG_BUILD_NUM')}",
+              "author_name": e("TG_OWNER"),
+              "author_url": f"https://github.com/{e('TG_REPO')}",
+              "content": json.dumps(content),
+              "return_content": "false"
+          }
+
+          req = urllib.request.Request(
+              "https://api.telegra.ph/createPage",
+              data=urllib.parse.urlencode(data).encode(),
+              method="POST"
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  result = json.load(resp)
+                  if result.get("ok"):
+                      print(result["result"]["url"])
+                  else:
+                      print(f"telegra.ph error: {result}", file=sys.stderr)
+                      print("")
+          except Exception as ex:
+              print(f"telegra.ph exception: {ex}", file=sys.stderr)
+              print("")
+          PYEOF
+          )
+
+          CAPTION="✅ <b>Kernel Build Successful!</b>
+
+          📱 <b>Device:</b> <code>$DEVICE_NAME ($DEVICE_CODENAME)</code>
+          ⚡ <b>KSU:</b> <code>ReSukiSU</code>
+          🐧 <b>Kernel:</b> <code>$KVER-$KERNEL_SUFFIX</code>
+          📅 <b>Date:</b> $DATE
+          📝 <b>Commit:</b> <code>$COMMIT_MSG</code>
+          🔢 <b>Hash:</b> <a href=\"$REPO_URL/commit/$GITHUB_SHA\">$COMMIT_HASH</a>
+          🔧 <b>Kernel features:</b> <a href=\"$TELEGRAPH_URL\">click to read</a>"
+
+          ZIP_PATH=$(ls $GITHUB_WORKSPACE/kernel_workspace/AnyKernel*.zip | head -n 1)
+          curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendDocument" \
+            -F chat_id="$TELEGRAM_CHAT_ID" \
+            -F document="@$ZIP_PATH" \
+            -F caption="$CAPTION" \
+            -F parse_mode="HTML"
+
+      - name: Send Telegram Notification (Failure)
+        if: failure()
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "Telegram secrets not set, skipping notification."
+            exit 0
+          fi
+          DATE=$(date +"%Y-%m-%d %H:%M:%S %Z")
+          REPO_URL="https://github.com/$GITHUB_REPOSITORY"
+          COMMIT_MSG="Workflow Dispatch: ${GKI_BRANCH:-$GKI_RELEASE}"
+          CAPTION="❌ <b>Kernel Build Failed!</b>
+
+          📱 <b>Device:</b> <code>$DEVICE_NAME ($DEVICE_CODENAME)</code>
+          ⚡ <b>KSU:</b> <code>ReSukiSU</code>
+          📅 <b>Date:</b> $DATE
+          📝 <b>Commit:</b> <code>$COMMIT_MSG</code>
+          🔢 <b>Hash:</b> <a href=\"$REPO_URL/commit/$GITHUB_SHA\">$(echo "$GITHUB_SHA" | cut -c1-8)</a>"
+
+          BUILD_LOG="$GITHUB_WORKSPACE/kernel_workspace/build.log"
+          if [ -f "$BUILD_LOG" ]; then
+            curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendDocument" \
+              -F chat_id="$TELEGRAM_CHAT_ID" \
+              -F document="@$BUILD_LOG" \
+              -F caption="$CAPTION" \
+              -F parse_mode="HTML"
+          else
+            curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+              -d chat_id="$TELEGRAM_CHAT_ID" \
+              -d text="$CAPTION" \
+              -d parse_mode="HTML"
+          fi
+
+  release:
+    needs: build
+    if: inputs.github_release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - name: Download ZIP Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.ak3name }}
+          path: ./release_zips
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FULL_VERSION: ${{ needs.build.outputs.kver }}-${{ needs.build.outputs.suffix }}
+          GKI_BRANCH: ${{ needs.build.outputs.gki_branch }}
+          KSUVER: ${{ needs.build.outputs.ksuver }}
+        run: |
+          TIME="$(date +'%y%m%d%H%M%S')"
+          TIME_FORM="$(date +'%Y-%m-%d %H:%M:%S %Z')"
+          TAG_HEAD="POCO-F7-ReSukiSU-build"
+
+          cat << EOF > release_notes.md
+          ### 📱 ${DEVICE_NAME} (${DEVICE_CODENAME}) ReSukiSU GKI Kernel
+          > Built from the Android Common Kernel GKI branch \`${GKI_BRANCH}\` for ${SOC_NAME}.
+          > Back up your stock boot.img before flashing.
+
+          - **Kernel Version:** ${FULL_VERSION}
+          - **Build Time:** ${TIME_FORM}
+          - **KSU Branch:** ReSukiSU (v${KSUVER})
+          - **SuSFS:** ${{ inputs.SUSFS }}
+          - **NTSync:** ${{ inputs.ntsync_enable }}
+          - **Droidspaces:** ${{ inputs.droidspaces_enable }}
+          - **IP_SET + IPv6 NAT:** ${{ inputs.ip_set_enable }}
+          - **TTL Target:** ${{ inputs.ttl_enable }}
+          - **Memory & Scheduler Optimizations:** ${{ inputs.mem_opt_patches }}
+          - **Multi-Manager:** true
+          - **ZSTD 1.5.7:** ${{ inputs.zstd_enable }}
+          - **LZ4KD:** ${{ inputs.lz4kd_enable }}
+          - **SchedUtil Optimizations:** ${{ inputs.schedutil_opt }}
+          - **BBR:** ${{ inputs.bbr_enable }}
+          - **BBRv3:** true (stock)
+          - **ADIOS IO:** ${{ inputs.adios_enable }}
+          - **Baseband Guard:** ${{ inputs.baseband_guard }}
+          - **Cortex-X4/A720 CPU Optimizations:** ${{ inputs.cpu_opt }}
+          - **Unicode Fix:** true (stock)
+          - **BORE Scheduler:** ${{ inputs.bore_enable }}
+          - **WireGuard:** ${{ inputs.wireguard }}
+          - **LRNG v60:** ${{ inputs.lrng_enable }}
+          - **Wakelock GC + limit:** ${{ inputs.wakelock_blocker }}
+          EOF
+
+          gh release create "${TAG_HEAD}-${TIME}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "${TAG_HEAD}-${FULL_VERSION}" \
+            --notes-file release_notes.md \
+            release_zips/AnyKernel3_*.zip
