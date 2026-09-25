@@ -1,0 +1,6 @@
+id=oplus_compat
+name=OPLUS compat modules (POCO F7)
+version=@KERNEL_RELEASE@
+versionCode=@VERSION_CODE@
+author=@AUTHOR@
+description=OnePlus hybridswap zram, horae shell-temp and sched_assist (opt-in), built for kernel @KERNEL_RELEASE@. Toggles and boot.log in /data/adb/oplus_compat

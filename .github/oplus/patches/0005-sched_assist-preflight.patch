@@ -1,0 +1,134 @@
+sched_assist: check vendor hook slots and oem data before loading
+
+Refuse to load when a restricted hook has no free probe slot or the task/rq
+oem data is used by another module, and stay loaded once hooks are registered
+instead of freeing the code they point to.
+
+--- a/cpu/sched/sched_assist/sched_assist.c
++++ b/cpu/sched/sched_assist/sched_assist.c
+@@ -15,6 +15,9 @@
+ #include <trace/hooks/signal.h>
+ #include <trace/events/sched.h>
+ #include <linux/kprobes.h>
++#include <linux/sched/signal.h>
++#include <linux/tracepoint.h>
++#include <trace/hooks/sched.h>
+ 
+ #include "sched_assist.h"
+ #include "sa_common.h"
+@@ -243,10 +246,89 @@
+ }
+ EXPORT_SYMBOL_GPL(enable_sched_assist);
+ 
++/*
++ * Restricted vendor hooks take at most ANDROID_RVH_NR_PROBES_MAX probes
++ * (kernel/tracepoint.c) and can never be unregistered. On non-OPLUS devices
++ * other vendor modules (WALT, ...) may already use the slots, and the task/rq
++ * oem data this module owns on OPLUS devices. Check before registering
++ * anything: failing halfway would leave hooks pointing into freed memory.
++ */
++#define SA_RVH_NR_PROBES_MAX	2
++
++static int __init sa_rvh_nr_probes(struct tracepoint *tp)
++{
++	struct tracepoint_func *funcs;
++	int n = 0;
++
++	if (!static_key_enabled(&tp->key))
++		return 0;
++
++	funcs = rcu_dereference_raw(tp->funcs);
++	while (funcs && n < SA_RVH_NR_PROBES_MAX && funcs[n].func)
++		n++;
++
++	return n;
++}
++
++#define SA_CHECK_RVH(hook)							\
++do {										\
++	if (sa_rvh_nr_probes(&__tracepoint_##hook) >= SA_RVH_NR_PROBES_MAX) {	\
++		ux_err("no free probe slot in " #hook ", not loading\n");	\
++		return -EBUSY;							\
++	}									\
++} while (0)
++
++static int __init sa_preflight(void)
++{
++	struct task_struct *g, *t;
++	bool busy = false;
++	int cpu;
++
++	/* keep in sync with the restricted hooks registered by this module */
++	SA_CHECK_RVH(android_rvh_after_enqueue_task);
++	SA_CHECK_RVH(android_rvh_can_migrate_task);
++	SA_CHECK_RVH(android_rvh_dequeue_entity);
++	SA_CHECK_RVH(android_rvh_dequeue_task);
++	SA_CHECK_RVH(android_rvh_do_sched_yield);
++	SA_CHECK_RVH(android_rvh_enqueue_entity);
++	SA_CHECK_RVH(android_rvh_place_entity);
++	SA_CHECK_RVH(android_rvh_sched_fork);
++	SA_CHECK_RVH(android_rvh_schedule);
++	SA_CHECK_RVH(android_rvh_set_cpus_allowed_comm);
++	SA_CHECK_RVH(android_rvh_setscheduler);
++	SA_CHECK_RVH(android_rvh_update_deadline);
++	SA_CHECK_RVH(android_rvh_wake_up_new_task);
++
++	rcu_read_lock();
++	for_each_process_thread(g, t) {
++		if (READ_ONCE(t->android_oem_data1[OTS_IDX])) {
++			busy = true;
++			break;
++		}
++	}
++	rcu_read_unlock();
++
++	for_each_possible_cpu(cpu) {
++		if (READ_ONCE(cpu_rq(cpu)->android_oem_data1[ORQ_IDX]))
++			busy = true;
++	}
++
++	if (busy) {
++		ux_err("task/rq android_oem_data1 is used by another module, not loading\n");
++		return -EBUSY;
++	}
++
++	return 0;
++}
++
+ static int __init oplus_sched_assist_init(void)
+ {
+ 	int ret;
+ 
++	ret = sa_preflight();
++	if (ret != 0)
++		return ret;
++
+ 	ret = sa_oemdata_init();
+ 	if (ret != 0)
+ 		return ret;
+@@ -258,13 +340,21 @@
+ 	resched_timer_init();
+ #endif
+ 
++	/*
++	 * Hooks are registered from here on and can't all be removed again:
++	 * stay loaded on errors instead of freeing the code they point to.
++	 */
+ 	ret = register_scheduler_vendor_hooks();
+-	if (ret != 0)
+-		return ret;
++	if (ret != 0) {
++		ux_err("register vendor hooks failed (%d), staying loaded\n", ret);
++		return 0;
++	}
+ 
+ 	ret = oplus_sched_assist_proc_init();
+-	if (ret != 0)
+-		return ret;
++	if (ret != 0) {
++		ux_err("proc init failed (%d), staying loaded\n", ret);
++		return 0;
++	}
+ 	detect_symbol();
+ 	if (_profile_event_register)
+ 		/* register a notifier to monitor task exit */

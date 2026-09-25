@@ -1,0 +1,5 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# OPLUS horae shell temperature (vendor/oplus/kernel/cpu/thermal).
+# build.sh copies horae_shell_temp.[ch] next to this file.
+
+obj-m += horae_shell_temp.o

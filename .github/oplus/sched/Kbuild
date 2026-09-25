@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# OPLUS sched_assist core (vendor/oplus/kernel/cpu/sched/sched_assist), built
+# as on OPLUS Qualcomm devices but without the optional features that need the
+# OPLUS WALT (load balance, pipeline, audio, ddl, blockio).
+# build.sh copies sched_assist/ next to this file, links the OPLUS cpu tree to
+# $(srctree)/kernel/oplus_cpu and puts the device's linux/sched/walt.h in include/.
+
+ccflags-y += -I$(src)/include -I$(srctree)/ -I$(src)/sched_assist
+ccflags-y += -DCONFIG_OPLUS_FEATURE_SCHED_ASSIST=1 -DCONFIG_OPLUS_SYSTEM_KERNEL_QCOM=1 \
+	-DCONFIG_SCHED_WALT=1 -DCONFIG_OPLUS_SCHED_GROUP_OPT=1 -DCONFIG_LOCKING_PROTECT=1
+
+obj-m += oplus_bsp_sched_assist.o
+oplus_bsp_sched_assist-y := $(addprefix sched_assist/, sched_assist.o sa_common.o \
+	sa_sysfs.o sa_exec.o sa_fair.o sa_jankinfo.o sa_oemdata.o sa_priority.o sa_group.o)

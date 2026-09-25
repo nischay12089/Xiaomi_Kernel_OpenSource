@@ -1,0 +1,65 @@
+hybridswap: rename zs_lookup_class_index to zs_lookup_class_index_oplus
+
+It was the only OPLUS zsmalloc export not suffixed with _oplus and clashes with
+the stock zsmalloc.ko, which then has to stay loaded next to it.
+
+--- a/mm/thp_zsmalloc/zsmalloc.c
++++ b/mm/thp_zsmalloc/zsmalloc.c
+@@ -1149,7 +1149,7 @@
+ }
+ 
+ /**
+- * zs_lookup_class_index() - Returns index of the zsmalloc &size_class
++ * zs_lookup_class_index_oplus() - Returns index of the zsmalloc &size_class
+  * that hold objects of the provided size.
+  * @pool: zsmalloc pool to use
+  * @size: object size
+@@ -1159,7 +1159,7 @@
+  * Return: the index of the zsmalloc &size_class that hold objects of the
+  * provided size.
+  */
+-unsigned int zs_lookup_class_index(struct zs_pool *pool, unsigned int size)
++unsigned int zs_lookup_class_index_oplus(struct zs_pool *pool, unsigned int size)
+ {
+ 	struct size_class *class;
+ 
+@@ -1167,7 +1167,7 @@
+ 
+ 	return class->index;
+ }
+-EXPORT_SYMBOL_GPL(zs_lookup_class_index);
++EXPORT_SYMBOL_GPL(zs_lookup_class_index_oplus);
+ 
+ unsigned long zs_get_total_pages_oplus(struct zs_pool *pool)
+ {
+--- a/mm/thp_zsmalloc/zsmalloc.h
++++ b/mm/thp_zsmalloc/zsmalloc.h
+@@ -55,7 +55,7 @@
+ unsigned long zs_get_total_pages_oplus(struct zs_pool *pool);
+ unsigned long zs_compact_oplus(struct zs_pool *pool);
+ 
+-unsigned int zs_lookup_class_index(struct zs_pool *pool, unsigned int size);
++unsigned int zs_lookup_class_index_oplus(struct zs_pool *pool, unsigned int size);
+ 
+ void zs_pool_stats_oplus(struct zs_pool *pool, struct zs_pool_stats *stats);
+ #endif
+--- a/mm/hybridswap_zram/zram_drv.c
++++ b/mm/hybridswap_zram/zram_drv.c
+@@ -1583,7 +1583,7 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	class_index_old = zs_lookup_class_index(zram->mem_pool, comp_len_old);
++	class_index_old = zs_lookup_class_index_oplus(zram->mem_pool, comp_len_old);
+ 	/*
+ 	 * Iterate the secondary comp algorithms list (in order of priority)
+ 	 * and try to recompress the page.
+@@ -1610,7 +1610,7 @@
+ 			return ret;
+ 		}
+ 
+-		class_index_new = zs_lookup_class_index(zram->mem_pool,
++		class_index_new = zs_lookup_class_index_oplus(zram->mem_pool,
+ 							comp_len_new);
+ 
+ 		/* Continue until we make progress */

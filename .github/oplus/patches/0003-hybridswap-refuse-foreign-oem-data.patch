@@ -1,0 +1,69 @@
+hybridswap: handle memcg/pgdat oem data owned by other drivers
+
+Clear writeback-policy values left in memcg->android_oem_data1[0] by the stock
+(Xiaomi) zram driver, and refuse to load if another module owns the slots.
+
+--- a/mm/hybridswap_zram/hybridswap/hybridmain.c
++++ b/mm/hybridswap_zram/hybridswap/hybridmain.c
+@@ -1317,6 +1317,50 @@
+ 	return ret;
+ }
+ 
++/*
++ * On non-OPLUS devices the stock zram driver (e.g. Xiaomi's) keeps small
++ * writeback-policy values in memcg->android_oem_data1[0], where hybridswap
++ * stores its per-memcg pointer (and BUG()s on anything non-zero). Clear such
++ * leftovers, and refuse to load if another module really owns these slots.
++ */
++static int __init hybridswap_check_oem_data(void)
++{
++	struct cgroup_subsys_state *css;
++	int nid, cleared = 0, ret = 0;
++
++	for_each_node(nid) {
++		if (NODE_DATA(nid) && NODE_DATA(nid)->android_oem_data1) {
++			log_err("pgdat android_oem_data1 of node %d is used by another module\n", nid);
++			return -EBUSY;
++		}
++	}
++
++	if (!root_mem_cgroup)
++		return 0;
++
++	rcu_read_lock();
++	css_for_each_descendant_pre(css, &root_mem_cgroup->css) {
++		struct mem_cgroup *memcg = mem_cgroup_from_css(css);
++		u64 val = READ_ONCE(memcg->android_oem_data1[0]);
++
++		if (!val)
++			continue;
++		if (virt_addr_valid((void *)val)) {
++			ret = -EBUSY;
++			break;
++		}
++		WRITE_ONCE(memcg->android_oem_data1[0], 0);
++		cleared++;
++	}
++	rcu_read_unlock();
++
++	if (ret)
++		log_err("memcg android_oem_data1[0] is used by another module\n");
++	else if (cleared)
++		log_info("cleared %d memcg oem values left by the previous zram driver\n", cleared);
++	return ret;
++}
++
+ int __init hybridswap_pre_init(void)
+ {
+ 	int ret;
+@@ -1327,6 +1371,10 @@
+ 	INIT_LIST_HEAD(&score_head);
+ 	log_level = HS_LOG_INFO;
+ 
++	ret = hybridswap_check_oem_data();
++	if (ret)
++		return ret;
++
+ 	hybridswap_cache = kmem_cache_create("mem_cgroup_hybridswap",
+ 			sizeof(struct mem_cgroup_hybridswap),
+ 			0, SLAB_PANIC, NULL);

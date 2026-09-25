@@ -1,0 +1,92 @@
+horae_shell_temp: register the shell zones without device tree nodes
+
+Non-OPLUS device trees have no oplus,shell-temp nodes. Also fix the misspelled
+proc entry name on unload.
+
+--- a/cpu/thermal/horae_shell_temp.c
++++ b/cpu/thermal/horae_shell_temp.c
+@@ -126,6 +126,60 @@
+ 	return 0;
+ }
+ 
++/*
++ * Device trees of non-OPLUS devices have no "oplus,shell-temp" nodes: register
++ * the shell zones fed through /proc/shell-temp without them, using the node
++ * names and order of the OPLUS device trees.
++ */
++static const char * const horae_default_zones[SHELL_MAX] = {
++	[SHELL_FRONT]	= "shell_front",
++	[SHELL_FRAME]	= "shell_frame",
++	[SHELL_BACK]	= "shell_back",
++};
++static struct horae_shell_temp *horae_default_hst[SHELL_MAX];
++
++static void horae_register_default_zones(void)
++{
++	struct thermal_zone_device *tz_dev;
++	struct horae_shell_temp *hst;
++	int i;
++
++	for (i = 0; i < SHELL_MAX; i++) {
++		hst = kzalloc(sizeof(*hst), GFP_KERNEL);
++		if (!hst)
++			return;
++
++		hst->shell_id = i;
++#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
++		tz_dev = thermal_tripless_zone_device_register(horae_default_zones[i],
++				hst, &shell_thermal_zone_ops, NULL);
++#else
++		tz_dev = thermal_zone_device_register(horae_default_zones[i],
++				0, 0, hst, &shell_thermal_zone_ops, NULL, 0, 0);
++#endif
++		if (IS_ERR_OR_NULL(tz_dev)) {
++			pr_err("register thermal zone %s failed\n", horae_default_zones[i]);
++			kfree(hst);
++			continue;
++		}
++		hst->tzd = tz_dev;
++		horae_default_hst[i] = hst;
++	}
++}
++
++static void horae_unregister_default_zones(void)
++{
++	int i;
++
++	for (i = 0; i < SHELL_MAX; i++) {
++		if (!horae_default_hst[i])
++			continue;
++		thermal_zone_device_unregister(horae_default_hst[i]->tzd);
++		kfree(horae_default_hst[i]);
++		horae_default_hst[i] = NULL;
++	}
++}
++
+ static struct platform_driver horae_shell_platdrv = {
+ 	.driver = {
+ 		.name		= "horae-shell-temp",
+@@ -267,16 +321,21 @@
+ 	ret = platform_driver_register(&horae_shell_platdrv);
+ 	if (ret) {
+ 		pr_err("register horae shell driver failed\n");
+-		remove_proc_entry("sehll-temp", NULL);
++		remove_proc_entry("shell-temp", NULL);
+ 		return -ENOENT;
+ 	}
+ 
++	/* nothing probed from the device tree */
++	if (ida_is_empty(&shell_temp_ida))
++		horae_register_default_zones();
++
+ 	return ret;
+ }
+ 
+ static void __exit horae_shell_exit(void)
+ {
+-	remove_proc_entry("sehll-temp", NULL);
++	horae_unregister_default_zones();
++	remove_proc_entry("shell-temp", NULL);
+ 	platform_driver_unregister(&horae_shell_platdrv);
+ }
+ 

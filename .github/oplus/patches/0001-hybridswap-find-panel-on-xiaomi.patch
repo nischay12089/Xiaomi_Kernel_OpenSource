@@ -1,0 +1,62 @@
+hybridswap: track the screen state on Xiaomi device trees
+
+Find the panel through the fingerprint-screen node when the OPLUS display node
+is missing, and register in a panel notifier client slot that exists (and is
+free) in the stock Qualcomm/Xiaomi panel_event_notifier.
+
+--- a/mm/hybridswap_zram/hybridswap/display.c
++++ b/mm/hybridswap_zram/hybridswap/display.c
+@@ -23,6 +23,41 @@
+ 
+ atomic_t display_off = ATOMIC_LONG_INIT(0);
+ #if IS_ENABLED(CONFIG_DRM_PANEL_NOTIFY) || IS_ENABLED(CONFIG_QCOM_PANEL_EVENT_NOTIFIER)
++#ifndef PANEL_EVENT_NOTIFIER_CLIENT_MM
++/*
++ * Non-OPLUS panel_event_notifier (e.g. Xiaomi): there is no MM client slot and
++ * each slot takes a single client, so use one that is free on the device.
++ * FINGERPRINT_SECOND is only taken on multi-screen devices.
++ */
++static int panel_client = PANEL_EVENT_NOTIFIER_CLIENT_FINGERPRINT_SECOND;
++module_param(panel_client, int, 0444);
++#define PANEL_EVENT_NOTIFIER_CLIENT_MM panel_client
++#endif
++
++/* Xiaomi device trees list the panels in the "panel" phandles of fingerprint-screen */
++static struct drm_panel *get_panel_from_node(const char *node_name, const char *prop)
++{
++	int i, count;
++	struct device_node *np, *panel_node;
++	struct drm_panel *panel = NULL;
++
++	np = of_find_node_by_name(NULL, node_name);
++	if (!np)
++		return NULL;
++
++	count = of_count_phandle_with_args(np, prop, NULL);
++	for (i = 0; i < count; i++) {
++		panel_node = of_parse_phandle(np, prop, i);
++		panel = of_drm_find_panel(panel_node);
++		of_node_put(panel_node);
++		if (!IS_ERR(panel))
++			break;
++		panel = NULL;
++	}
++	of_node_put(np);
++	return panel;
++}
++
+ static struct drm_panel *get_active_panel(void)
+ {
+ 	int i;
+@@ -33,6 +68,11 @@
+ 
+ 	np = of_find_node_by_name(NULL, "oplus,dsi-display-dev");
+ 	if (!np) {
++		panel = get_panel_from_node("fingerprint-screen", "panel");
++		if (panel) {
++			log_warn("active panel found via fingerprint-screen\n");
++			return panel;
++		}
+ 		log_err("oplus,dsi-display-dev node missing\n");
+ 		return NULL;
+ 	}

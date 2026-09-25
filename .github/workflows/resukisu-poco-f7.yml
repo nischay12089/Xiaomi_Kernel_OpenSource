@@ -151,6 +151,11 @@ on:
         required: true
         type: boolean
         default: true
+      oplus_modules:
+        description: 'OnePlus hybridswap/horae/sched_assist modules for ColorOS/OxygenOS ports (KernelSU module, experimental)'
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -959,6 +964,26 @@ jobs:
           ccache -s
           df -h
 
+      # OnePlus vendor modules for OPLUS ROM ports, see .github/oplus
+      - name: Checkout OPLUS module port
+        if: inputs.oplus_modules
+        uses: actions/checkout@v4
+        with:
+          path: kernel_workspace/device
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            .github/oplus/
+            include/linux/soc/qcom/panel_event_notifier.h
+            include/linux/sched/walt.h
+
+      - name: 🧩 Build OPLUS modules (hybridswap, horae, sched_assist)
+        if: inputs.oplus_modules
+        working-directory: kernel_workspace/common
+        run: |
+          export PATH="$GITHUB_WORKSPACE/kernel_workspace/zyc-clang/bin:$PATH"
+          KMAKE="$GITHUB_WORKSPACE/kernel_workspace/kmake" \
+            bash ../device/.github/oplus/build.sh . "$KOUT" ../oplus_out
+
       - name: 📦 Save New CCache
         if: success()
         uses: actions/cache/save@v4
@@ -986,6 +1011,19 @@ jobs:
           if [[ ! -f ./Image ]]; then
             echo "Kernel Image not found, build may have failed."
             exit 1
+          fi
+          if [ -f ../oplus_out/oplus_modules.zip ]; then
+            cp ../oplus_out/oplus_modules.zip ./
+            cat >> anykernel.sh << 'EOF'
+          if [ -f "$AKHOME/oplus_modules.zip" ]; then
+              if [ -f /data/adb/ksud ]; then
+                  ui_print "Installing OPLUS compat modules..."
+                  /data/adb/ksud module install "$AKHOME/oplus_modules.zip"
+              else
+                  ui_print "KSUD not found: install oplus_modules.zip from the KernelSU manager"
+              fi
+          fi
+          EOF
           fi
           KSU_TYPENAME="ReSukiSU"
           AK3_NAME="AnyKernel3_${KSU_TYPENAME}_${KSUVER}_${KVER}-${KERNEL_SUFFIX}_POCO-F7.zip"
@@ -1019,6 +1057,7 @@ jobs:
             echo "TTL: ${{ inputs.ttl_enable }}"
             echo "MemOpt: ${{ inputs.mem_opt_patches }}"
             echo "BORE: ${{ inputs.bore_enable }}"
+            echo "OPLUS modules: ${{ inputs.oplus_modules }}"
           } > ./ak3.log
           zip -z ../$AK3_NAME < ./ak3.log
 
@@ -1027,6 +1066,13 @@ jobs:
         with:
           name: ${{ steps.create_zip.outputs.ak3name }}
           path: ${{ github.workspace }}/kernel_workspace/AnyKernel*.zip
+
+      - name: 📤 Upload OPLUS modules
+        if: inputs.oplus_modules
+        uses: actions/upload-artifact@v4
+        with:
+          name: oplus_modules_${{ env.KVER }}-${{ env.KERNEL_SUFFIX }}
+          path: ${{ github.workspace }}/kernel_workspace/oplus_out/oplus_modules.zip
 
       - name: Send Telegram Notification (Success)
         if: success()
@@ -1261,6 +1307,7 @@ jobs:
           - **IP_SET + IPv6 NAT:** ${{ inputs.ip_set_enable }}
           - **TTL Target:** ${{ inputs.ttl_enable }}
           - **Memory & Scheduler Optimizations:** ${{ inputs.mem_opt_patches }}
+          - **OPLUS modules (hybridswap/horae/sched_assist):** ${{ inputs.oplus_modules }}
           - **Multi-Manager:** true
           - **ZSTD 1.5.7:** ${{ inputs.zstd_enable }}
           - **LZ4KD:** ${{ inputs.lz4kd_enable }}

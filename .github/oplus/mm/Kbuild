@@ -1,0 +1,43 @@
+# SPDX-License-Identifier: GPL-2.0-only
+# OPLUS hybridswap zram as out-of-tree modules, following the
+# define_oplus_ddk_module() rules in vendor/oplus/kernel/mm/oplus_local_modules.bzl.
+# build.sh copies hybridswap_zram/, thp_zsmalloc/ and zstd_o/ next to this file.
+
+ccflags-y += -I$(src) -I$(src)/include
+
+obj-m += oplus_fg_info.o
+obj-m += oplus_bsp_zsmalloc.o
+obj-m += oplus_bsp_zstdn.o
+obj-m += oplus_bsp_zstdn_o.o
+obj-m += oplus_bsp_hybridswap_zram.o
+
+oplus_bsp_zsmalloc-y := thp_zsmalloc/zsmalloc.o
+
+zstd_objs := crypto_zstd.o zstd_compress_module.o xxhash.o \
+	common/debug.o common/entropy_common.o common/error_private.o \
+	common/fse_decompress.o common/zstd_common.o \
+	compress/fse_compress.o compress/hist.o compress/huf_compress.o \
+	compress/zstd_compress.o compress/zstd_compress_literals.o \
+	compress/zstd_compress_sequences.o compress/zstd_compress_superblock.o \
+	compress/zstd_double_fast.o compress/zstd_fast.o compress/zstd_lazy.o \
+	compress/zstd_ldm.o compress/zstd_opt.o \
+	zstd_decompress_module.o decompress/huf_decompress.o \
+	decompress/zstd_ddict.o decompress/zstd_decompress.o \
+	decompress/zstd_decompress_block.o
+
+oplus_bsp_zstdn-y := $(addprefix hybridswap_zram/zstd/, $(zstd_objs))
+oplus_bsp_zstdn_o-y := $(addprefix zstd_o/, $(zstd_objs))
+
+hybridswap_objs := hybridswap_zram/zcomp.o hybridswap_zram/zram_drv.o \
+	hybridswap_zram/hybridswap/hybridmain.o \
+	hybridswap_zram/hybridswap/hybridswapd.o \
+	hybridswap_zram/hybridswap/display.o \
+	hybridswap_zram/hybridswap/hybridswap.o
+
+oplus_bsp_hybridswap_zram-y := $(hybridswap_objs)
+
+# local_defines/conditional_defines ("qcom") of oplus_bsp_hybridswap_zram
+$(foreach o,$(basename $(hybridswap_objs)),$(eval CFLAGS_$(o).o += \
+	-DCONFIG_HYBRIDSWAP -DCONFIG_HYBRIDSWAP_SWAPD -DCONFIG_HYBRIDSWAP_CORE \
+	-DCONFIG_CRYPTO_LZ4K -DCONFIG_CRYPTO_ZSTDN -DCONFIG_CRYPTO_ZSTDN_O \
+	-DCONFIG_QCOM_PANEL_EVENT_NOTIFIER))
