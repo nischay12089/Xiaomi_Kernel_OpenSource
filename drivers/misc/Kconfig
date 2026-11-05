@@ -604,6 +604,6 @@ source "drivers/misc/cardreader/Kconfig"
 source "drivers/misc/uacce/Kconfig"
 source "drivers/misc/pvpanic/Kconfig"
 source "drivers/misc/mchp_pci1xxxx/Kconfig"
-source "drivers/misc/hwid/Kconfig"
+# source "drivers/misc/hwid/Kconfig"  # not in Xiaomi OSS release
 source  "drivers/misc/mem_reclaim_ctl/Kconfig"
 endmenu
