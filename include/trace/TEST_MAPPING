@@ -1,13 +1,7 @@
 {
   "imports": [
     {
-      "path": "packages/modules/Connectivity"
-    },
-    {
       "path": "packages/services/Telecomm"
-    },
-    {
-      "path": "system/netd"
     }
  ],
  "presubmit": [
@@ -306,6 +300,38 @@
     },
     {
       "name": "VtsBootconfigTest"
+    },
+    {
+      "name": "binderDriverInterfaceTest"
+    },
+    {
+      "name": "binderLibTest"
+    },
+    {
+      "name": "binderSafeInterfaceTest"
+    },
+    {
+      "name": "memunreachable_binder_test"
+    },
+    {
+      "name": "VtsHalBluetoothAudioTargetTest"
+    },
+    {
+      "name": "CtsBionicTestCases"
+    },
+    {
+      "name": "CtsLibcoreTestCases"
+    },
+    {
+      "name": "CtsUsbTests"
+    },
+    {
+      "name": "CtsDrmTestCases",
+      "options": [
+        {
+          "exclude-filter": "android.drm.cts.DRMTest#testForwardLockAccess"
+        }
+      ]
     }
   ]
 }
