@@ -1,4 +1,4 @@
-obj-m += rsmc_driver.o
+obj-$(CONFIG_CETC_RSMC) += rsmc_driver.o
 rsmc_driver-objs :=
 rsmc_driver-objs += rsmc_chiptype_select.o
 rsmc_driver-objs += x801/rsmc_start_x801.o

@@ -1,5 +1,6 @@
 config CETC_RSMC
 	tristate "BDs SMS device"
+	depends on PINCTRL_MSM
     default m
     help
 	  BeiDou short packet kernel driver, used to adapt to the short packet chip.

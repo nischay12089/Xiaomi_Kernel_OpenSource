@@ -306,7 +306,7 @@ static inline int walt_set_enforce_high_irq_cpus(struct cpumask *set)
 	return -EINVAL;
 }
 
-static inline void walt_unset_enforce_high_irq_cpus(struct cpumask *unset)
+static inline int walt_unset_enforce_high_irq_cpus(struct cpumask *unset)
 {
 	return -EINVAL;
 }

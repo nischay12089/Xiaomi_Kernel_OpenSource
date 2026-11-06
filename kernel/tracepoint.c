@@ -795,7 +795,8 @@ static void *rvh_zalloc_funcs(int count)
 	return kzalloc(sizeof(struct tracepoint_func) * count, GFP_KERNEL);
 }
 
-#define ANDROID_RVH_NR_PROBES_MAX	2
+/* onyx: sched_walt + Xiaomi + oplus share hooks (peak 3); 4 leaves one spare */
+#define ANDROID_RVH_NR_PROBES_MAX	4
 static int rvh_func_add(struct tracepoint *tp, struct tracepoint_func *func)
 {
 	int i;

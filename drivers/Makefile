@@ -200,7 +200,7 @@ obj-$(CONFIG_CDX_BUS)		+= cdx/
 
 obj-$(CONFIG_S390)		+= s390/
 
-obj-y         += rsmc/
+obj-$(CONFIG_CETC_RSMC) += rsmc/
 obj-y				+= xiaomi/
 obj-$(CONFIG_MIHW)		+= mihw/
 obj-$(CONFIG_MI_RT_MONITOR)	+= sandbox/
