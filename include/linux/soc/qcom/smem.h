@@ -11,7 +11,7 @@ void *qcom_smem_get(unsigned int host, unsigned int item, size_t *size);
 #else
 static inline void *qcom_smem_get(unsigned int host, unsigned int item, size_t *size)
 {
-	return ERR_PTR(ENODEV);
+	return ERR_PTR(-ENODEV);
 }
 #endif
 int qcom_smem_get_free_space(unsigned host);
