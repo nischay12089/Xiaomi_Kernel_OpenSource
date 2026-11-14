@@ -6,9 +6,12 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 export PATH="$HOME/onyx-toolchain/clang-r510928/bin:$PATH"
+# /proc/version shows user@host; default would be the build machine's login and hostname (Google's GKI uses these)
+export KBUILD_BUILD_USER="${KBUILD_BUILD_USER:-build-user}" KBUILD_BUILD_HOST="${KBUILD_BUILD_HOST:-build-host}"
 # HOSTCFLAGS: host glibc >= 2.43 makes strchr() return const char *, which -Werror in tools/lib/bpf rejects
+# LOCALVERSION= (set but empty): release is exactly 6.6.x + CONFIG_LOCALVERSION, no "+" for an untagged tree
 M=(make -j"$(nproc)" O=out ARCH=arm64 LLVM=1 LLVM_IAS=1 KCFLAGS=-D__ANDROID_COMMON_KERNEL__
-   HOSTCFLAGS=-Wno-incompatible-pointer-types-discards-qualifiers)
+   HOSTCFLAGS=-Wno-incompatible-pointer-types-discards-qualifiers LOCALVERSION=)
 
 "${M[@]}" onyx_defconfig
 "${M[@]}" Image "$@"
