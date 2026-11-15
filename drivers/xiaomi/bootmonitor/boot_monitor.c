@@ -50,7 +50,7 @@ static void exit_boot_monitor(struct bootmonitor_context *cxt) {
 		sync_blockdev(bdev);
 		mutex_destroy(&write_bm_mutex);
 		invalidate_mapping_pages(bdev->bd_inode->i_mapping, 0, -1);
-		blkdev_put(bdev, NULL);
+		blkdev_put(bdev, THIS_MODULE); /* same holder as blkdev_get_by_path(), or the EXCL claim leaks */
 		MTN_PRINT_INFO("%s-%d:invalidate_mapping_pages end\n", __func__, __LINE__);
 	}
 	if (bm_write_buffer) {
@@ -338,7 +338,7 @@ static void __exit boot_monitor_exit(void)
 	} else {
 		sync_blockdev(bdev);
 		invalidate_mapping_pages(bdev->bd_inode->i_mapping, 0, -1);
-		blkdev_put(bdev, NULL);
+		blkdev_put(bdev, THIS_MODULE); /* same holder as blkdev_get_by_path(), or the EXCL claim leaks */
 		MTN_PRINT_ERR("invalidate_mapping_pages end\n");
 	}
 	mutex_destroy(&write_bm_mutex);
