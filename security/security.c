@@ -222,6 +222,12 @@ static void __init lsm_set_blob_sizes(struct lsm_blob_sizes *needed)
 			  &blob_sizes.lbs_xattr_count);
 }
 
+/* onyx: kernelsu.ko links these by kallsyms (no CRC), so new members must stay after the 6.6 KMI ones */
+static_assert(offsetof(struct lsm_blob_sizes, lbs_inode) == 8 &&
+	      offsetof(struct lsm_blob_sizes, lbs_xattr_count) == 28);
+static_assert(offsetof(struct security_hook_heads, backing_file_alloc) >
+	      offsetof(struct security_hook_heads, locked_down));
+
 /* Prepare LSM for initialization. */
 static void __init prepare_lsm(struct lsm_info *lsm)
 {
